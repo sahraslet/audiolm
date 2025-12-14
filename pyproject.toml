@@ -5,7 +5,7 @@ description = "An Audio Language Model"
 readme = "README.md"
 authors = [
     { name = "ajdsouza", email = "ajdsouz@outlook.com" },
-    { name = "sslet", email = "abc@gmail" },
+    { name = "sslet", email = "s8saslet@stud.uni-saarland.de" },
     { name = "Houda", email = "pqr@gmail" }
 ]
 requires-python = ">=3.12"
