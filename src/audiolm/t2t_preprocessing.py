@@ -4,6 +4,18 @@ from transformers import AutoTokenizer
 from datasets import load_dataset, concatenate_datasets
 import argparse
 
+parser = argparse.ArgumentParser(description="Preprocess audio datasets.")
+parser.add_argument("--path", type=str, required=True, help="Hugging Face dataset path(s), comma-separated for multiple datasets.")
+parser.add_argument("--subset", type=str, default=None, help="Subset(s) of the dataset if applicable, comma-separated for multiple datasets.")
+parser.add_argument("--split", type=str, default="train", help="Dataset split(s) to use, comma-separated for multiple datasets.")
+parser.add_argument("--src_lang", type=str, required=True, help="Source language column name.")
+parser.add_argument("--tgt_lang", type=str, required=True, help="Target language column name.")
+parser.add_argument("--tokenizer", type=str, default="bert-base-multilingual-cased", help="Pretrained tokenizer name.")
+parser.add_argument("--max_length", type=int, default=128, help="Maximum sequence length.")
+parser.add_argument("--output_dir", type=str, default="./preprocessed", help="Directory to save the preprocessed dataset.")
+args = parser.parse_args()
+
+
 # Reduce dataset to necessary columns
 def reduce_columns(dataset, columns_to_keep):
     '''Reduce dataset to only specified columns.'''
@@ -27,61 +39,45 @@ def preprocess_function(batch, tokenizer, max_length, src_lang, tgt_lang):
     return model_inputs
 
 
-def main(language):
-    tokenizer = AutoTokenizer.from_pretrained("bert-base-multilingual-cased")
-    if language in ["arabic_english", "all"]:
-        # Load English translation datasets
-        arabic_english_1 = load_dataset("fr3on/egyptian-dialogue")
-        arabic_english_1 = reduce_columns(arabic_english_1, ["arabic", "english"])
-        arabic_english_1 = arabic_english_1.rename_column("arabic", "ar")
-        arabic_english_1 = arabic_english_1.rename_column("english", "en")
+def make_ttt_dataset(args: argparse.Namespace) -> None:
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+    datasets_list = []
 
-        arabic_english_1 = arabic_english_1.map(lambda batch: preprocess_function(tokenizer, max_length=128, src_lang="ar", tgt_lang="en"), batched=True)
+    dataset_paths = args.path.split(",")
+    subsets = args.subset.split(",")
+    splits = args.split.split(",")
+    src_langs = args.src_lang.split(",")
+    tgt_langs = args.tgt_lang.split(",")
 
-        arabic_english_2 = load_dataset("ImruQays/Rasaif-Classical-Arabic-English-Parallel-texts")
-        arabic_english_2 = arabic_english_2.map(lambda batch: preprocess_function(tokenizer, max_length=128, src_lang="ar", tgt_lang="en"), batched=True)
+    for path, subset, split, src, tgt in zip(dataset_paths, subsets, splits, src_langs, tgt_langs):
+        kwargs = {}
+        if subset and subset != "None":
+            kwargs["subset"] = subset
+        if split and split != "None":
+            kwargs["split"] = split
+        dataset = load_dataset(path, **kwargs)
+        # Reduce to src and tgt columns
+        dataset = dataset.remove_columns([c for c in dataset.column_names if c not in [src, tgt]])
 
-        arabic_english_3 = load_dataset("ImruQays/Thaqalayn-Classical-Arabic-English-Parallel-texts")
-        arabic_english_3 = arabic_english_3.map(lambda batch: preprocess_function(tokenizer, max_length=128, src_lang="ar", tgt_lang="en"), batched=True)
+        # Rename columns to unified names
+        if src != "src":
+            dataset = dataset.rename_column(src, "src")
+        if tgt != "tgt":
+            dataset = dataset.rename_column(tgt, "tgt")
 
-        arabic_english_4 = load_dataset("majedk01/english-arabic-text")
-        arabic_english_4 = arabic_english_4.map(lambda batch: tokenizer(
-        [f"<ar2en>" + example["ar"] for example in batch["translation"]],
-        text_target=[example["en"] for example in batch["translation"]],
-        max_length=128,
-        truncation=True
-    ),
-    batched=True)
+        # Tokenize
+        dataset = dataset.map(lambda batch: preprocess_function(batch, tokenizer, src_lang="src", tgt_lang="tgt",
+                                                                max_length=args.max_length),
+                              batched=True)
+        datasets_list.append(dataset)
 
-        arabic_english_5 = load_dataset("salehalmansour/english-to-arabic-translate")
-        arabic_english_5 = arabic_english_5.map(lambda batch: preprocess_function(tokenizer, max_length=128, src_lang="en", tgt_lang="ar"), batched=True)
+    # Combine all datasets
+    final_dataset = concatenate_datasets(datasets_list)
+    out_path = f"{args.output_dir}"
+    final_dataset.save_to_disk(out_path)
+    print(f"Saved {len(final_dataset)} samples → {out_path}")
 
-        concatenated_arabic_english = concatenate_datasets([arabic_english_1, arabic_english_2, arabic_english_3, arabic_english_4, arabic_english_5])
-
-        # save dataset
-        concatenated_arabic_english.save_to_disk("./preprocessed/arabic_english")
-
-
-    if language in ["german_english", "all"]:
-        german_english_1 = load_dataset("Darth-Vaderr/English-German")
-        german_english_1 = german_english_1.rename_column("English", "en")
-        german_english_1 = german_english_1.rename_column("German", "de")
-        german_english_1 = german_english_1.map(preprocess_function(tokenizer, max_length=128, src_lang="en", tgt_lang="de"), batched=True)
-
-        german_english_2 = load_dataset("nvidia/granary", "de", split="ast")
-        german_english_2 = german_english_2.map(preprocess_function(tokenizer, max_length=128, src_lang="en", tgt_lang="de"), batched=True)
-
-        concatenated_german_english = concatenate_datasets([german_english_1, german_english_2])
-
-        # save dataset
-        concatenated_german_english.save_to_disk("./preprocessed/german_english")
+make_ttt_dataset(args=args)
 
 
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Preprocess audio datasets.")
-    parser.add_argument("--language", type=str, choices=[ "german_english", "arabic_english", "german_arabic","all"],
-                        help="Choose one more more translation pairs.")
-    args = parser.parse_args()
-    main(args.language)
 
