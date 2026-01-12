@@ -8,7 +8,8 @@ uv run python src/audiolm/asr_preprocessing.py \
     --name='clean' \
     --split='train' \
     --text_column='text' \
-    --model_name='openai/whisper-small' \
+    --audio_processor='facebook/w2v-bert-2.0' \
+    --text_tokenizer='facebook/wav2vec2-base-960h'
     --max_duration=30.0 \
     --output_dir='asr_dataset_english' \
     --sampling_rate=16000
@@ -19,7 +20,8 @@ uv run python src/audiolm/asr_preprocessing.py \
     --path='flozi00/asr-german-mixed' \
     --split='train' \
     --text_column='transkription' \
-    --model_name='openai/whisper-small' \
+    --audio_processor='facebook/w2v-bert-2.0' \
+    --text_tokenizer='facebook/wav2vec2-base-960h' \
     --max_duration=30.0 \
     --output_dir='asr_dataset_german' \
     --sampling_rate=16000
