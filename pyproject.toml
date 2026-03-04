@@ -10,10 +10,14 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "datasets>=4.4.1",
+    "beartype>=0.22.9",
+    "datasets==2.21.0",
+    "librosa>=0.11.0",
     "scikit-learn>=1.8.0",
+    "soundfile>=0.13.1",
+    "speechtokenizer>=1.0.1",
+    "tensorboard>=2.20.0",
     "torch>=2.9.1",
-    "torchcodec>=0.9.1",
     "transformers>=4.57.3",
 ]
 
