@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader
 parser = argparse.ArgumentParser()
 
 parser.add_argument("--dataset_path", type=str)
+parser.add_argument("--model_checkpoint", type=str)
 parser.add_argument("--checkpoint_dir", type=str)
 parser.add_argument("--logfile_path", type=str)
 parser.add_argument("--wandb_project_name", type=str)
@@ -45,6 +46,17 @@ cfg = QwenConfig(
 )
 
 model = QwenCausalLM(cfg)
+state_dict = torch.load(args.model_checkpoint, weights_only=True)
+
+try:
+    missing, unexpected = model.load_state_dict(state_dict)
+    if not missing and not unexpected:
+        print("state dict loaded successfully")
+    else:
+        print("missing keys or unexpected keys were found")
+except Exception as e:
+    print(f"An error occured while loading weights: {e}")
+
 
 ds = load_from_disk(args.dataset_path)
 ds.set_format("torch", columns=["input_ids", "attention_mask"])
@@ -58,7 +70,7 @@ loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
 trainer = Trainer(
-    config=testcfg,
+    config=cfg,
     checkpoint_dir=args.checkpoint_dir,
     log_file=args.logfile_path,
     wandb_project_name=args.wandb_project_name,
