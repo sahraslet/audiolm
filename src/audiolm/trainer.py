@@ -1,4 +1,3 @@
-from .model import ModelConfig
 
 import wandb
 import logging
@@ -12,7 +11,7 @@ import torch.nn as nn
 class Trainer:
     def __init__(
             self,
-            config: ModelConfig,
+            config,
             checkpoint_dir: str,
             log_file: str,
             wandb_project_name: str,
@@ -60,11 +59,18 @@ class Trainer:
     def _common_step(self, batch) -> torch.Tensor:
         input_ids = batch['input_ids'].to(self.device)
         attention_mask = batch['attention_mask'].to(self.device)
-        labels =batch['labels'].to(self.device)
-        labels = torch.where((labels >= 0) & (labels < self.model.config.vocab_size), labels, -100)
-        outputs = self.model(input_ids, attention_mask)
+        inputs = input_ids[:,:-1]
+        attention_mask = attention_mask[:, :-1]
+        targets = input_ids[:,1:]
+
+        targets = torch.where(
+            attention_mask == 1,
+            targets,
+            torch.tensor(-100, device=self.device)
+        )
+        outputs = self.model(inputs, attention_mask)
         loss = self.loss_fn(
-            outputs.view(-1, outputs.size(-1)), labels.view(-1)
+            outputs.view(-1, outputs.size(-1)), targets.view(-1)
         )
         return loss
 
