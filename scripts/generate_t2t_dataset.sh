@@ -2,6 +2,7 @@
 
 uv run scripts/generate_t2t_dataset.py \
     --dataset_name='dvgodoy/yoda_sentences' \
+    --split=0.5 \
     --flip_ratio=0.5 \
     --num_proc=2 \
     --src_column='sentence' \

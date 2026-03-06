@@ -6,7 +6,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizer
 parser = argparse.ArgumentParser()
 parser.add_argument("--dataset_name", type=str)
 # parser.add_argument("--subset", type=str)
-# parser.add_argument("--split", type=float)
+parser.add_argument("--split", type=float)
 parser.add_argument("--flip_ratio", type=float)
 parser.add_argument("--num_proc", type=int)
 parser.add_argument("--src_column", type=str)
@@ -90,10 +90,11 @@ def create_datasets(args: argparse.Namespace):
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
     dataset = load_dataset(args.dataset_name)
     print(f"using {args.tokenizer} on {args.dataset_name}")
-    flip_split = int(args.flip_ratio * len(dataset['train']))
-    indices = list(range(len(dataset['train'])))
-    flip = dataset['train'].select(indices[:flip_split])
-    no_flip = dataset['train'].select(indices[flip_split:])
+    dataset = dataset['train'].select(range(int(args.split * len(dataset['train']))))
+    flip_split = int(args.flip_ratio * len(dataset))
+    indices = list(range(len(dataset)))
+    flip = dataset.select(indices[:flip_split])
+    no_flip = dataset.select(indices[flip_split:])
 
     flipped_dataset = preprocess_dataset(
         flip,
