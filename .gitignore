@@ -12,3 +12,5 @@ wheels/
 ckpt/
 scratch/
 data/
+logs/
+wandb/
