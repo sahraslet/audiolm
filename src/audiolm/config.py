@@ -12,7 +12,11 @@ class QwenConfig:
     rmsnorm_eps: float
     rope_theta: float
     dropout: float
-    vocab_size: int
+    vocab_size: int          # muss == text_vocab_size sein (Qwen embed_tokens + special tokens)
+    text_vocab_size: int     # ← neu: für den assert in AudioLM und Loss
     activation: str
     pad_token_id: int
+    audio_token_id: int      # ← neu: ID von <|audio|> token
     tie_word_embeddings: bool
+    audio_vocab_size: int
+    n_codebooks: int

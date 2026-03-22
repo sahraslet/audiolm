@@ -20,9 +20,14 @@ class QwenModel(nn.Module):
         self.norm = QwenRMSNorm(hidden_size=config.d_model, eps=config.rmsnorm_eps)
         self.rotary_emb = QwenRoPE(config=config)
 
-    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor | None = None):
-        B, S = input_ids.shape
-        x = self.embed_tokens(input_ids)
+    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor | None = None, inputs_embeds: torch.Tensor | None = None) -> torch.Tensor:
+
+        if inputs_embeds is not None:
+            x= inputs_embeds
+        else:
+            x = self.embed_tokens(input_ids)
+
+        B, S = x.shape[:2]
         position_ids = torch.arange(S, dtype = torch.long).unsqueeze(0).expand(B, -1) # all position ids start from 0
         position_embeds = self.rotary_emb(x, position_ids)
         for layer in self.layers:

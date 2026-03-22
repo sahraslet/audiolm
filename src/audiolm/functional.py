@@ -6,6 +6,7 @@ from contextlib import nullcontext
 from sacrebleu import BLEU
 from transformers import PreTrainedTokenizer
 from evaluate import load
+import torch.nn as nn
 
 
 
@@ -160,3 +161,120 @@ def compute_wer(predicted: torch.Tensor, ground_truth: torch.Tensor, tokenizer: 
     score = wer_metric.compute(predictions=predictions, references=references)
 
     return score
+
+
+
+def apply_delay_pattern(codes: torch.Tensor, bos_token_id: int, pad_token_id: int) -> torch.Tensor:
+    """
+    Apply MusicGen-style delay pattern. Codebook k is shifted right by k positions.
+    Input:  [n_codebooks, seq_len]
+    Output: [n_codebooks, seq_len + n_codebooks - 1]
+    """
+    n_codebooks = codes.shape[0]
+    rows = []
+    for k in range(n_codebooks):
+        bos = torch.full((k,), bos_token_id, dtype=torch.long, device=codes.device)
+        pad = torch.full((n_codebooks - k - 1,), pad_token_id, dtype=torch.long, device=codes.device)
+        rows.append(torch.cat([bos, codes[k], pad]))
+    return torch.stack(rows)
+
+def deinterleave_audio_tokens(interleaved_audio, bos_token_id, pad_token_id):
+    """
+    Deinterleave audio tokens into separate codebooks. interleaved_audio has shape [n_codebooks, n_tokens_per_codebook + n_codebooks - 1]
+    """
+    n_codebooks = interleaved_audio.shape[0]
+    deinterleaved = []
+
+    for codebook in range(n_codebooks):
+        tokens = interleaved_audio[codebook]
+        mask = (tokens != bos_token_id) & (tokens != pad_token_id)
+        deinterleaved.append(tokens[mask])
+
+    return torch.stack(deinterleaved)
+
+
+def build_audio_mask(token_ids: torch.Tensor, audio_token_id: int) -> torch.Tensor:
+    """
+    Build a boolean mask that is True wherever token_ids == audio_token_id.
+
+    Args:
+        token_ids: (B, T)
+    Returns:
+        (B, T) bool
+    """
+    return token_ids == audio_token_id
+
+
+def build_causal_mask(seq_len: int, device: torch.device) -> torch.Tensor:
+    """
+    Standard causal (lower-triangular) attention mask.
+
+    Returns:
+        (1, 1, seq_len, seq_len) float mask with 0 / -inf
+    """
+    mask = torch.tril(torch.ones(seq_len, seq_len, device=device))
+    return mask.unsqueeze(0).unsqueeze(0)  # (1, 1, T, T)
+
+
+# ===========================================================================
+# Loss
+# ===========================================================================
+
+def audio_lm_loss(
+        logits_audio: torch.Tensor | None,  # (B, K, T, audio_vocab_size)
+        logits_text: torch.Tensor,  # (B, T, text_vocab_size)
+        audio_labels: torch.Tensor | None,  # (B, K, T)  values in [0, audio_vocab_size) or -100
+        text_labels: torch.Tensor,  # (B, T)     values in [0, text_vocab_size)  or -100
+        n_codebooks: int,
+        audio_vocab_size: int,
+        text_loss_weight: float = 1.0,
+        audio_loss_weight: float = 1.0,
+) -> torch.Tensor:
+    """
+    Combined cross-entropy loss for text + K audio codebooks.
+
+    Shape contract:
+        logits_audio:  (B, K, T, audio_vocab_size)   ← K zuerst
+        audio_labels:  (B, K, T)                      ← K zuerst, -100 = ignore
+        logits_text:   (B, T, text_vocab_size)
+        text_labels:   (B, T)                          ← -100 = ignore
+
+    Audio-Labels müssen NICHT offset-kodiert sein — sie sind raw [0, audio_vocab_size).
+    apply_audio_offset() wird nur für das interleaved flat-token-stream Format benötigt,
+    nicht für separate Codebook-Heads.
+    """
+    ce = nn.CrossEntropyLoss(ignore_index=-100)
+
+    # --- Text Loss ---
+    # logits_text: (B, T, V) → (B*T, V);  text_labels: (B*T,)
+    loss = text_loss_weight * ce(
+        logits_text.reshape(-1, logits_text.size(-1)),
+        text_labels.reshape(-1),
+    )
+
+    # --- Audio Loss (K codebooks) ---
+    if logits_audio is not None and audio_labels is not None:
+        # logits_audio: (B, K, T, audio_vocab_size)
+        # audio_labels: (B, K, T)
+        assert logits_audio.shape[1] == n_codebooks, (
+            f"logits_audio.shape[1]={logits_audio.shape[1]} != n_codebooks={n_codebooks}"
+        )
+        assert audio_labels.shape[1] == n_codebooks, (
+            f"audio_labels.shape[1]={audio_labels.shape[1]} != n_codebooks={n_codebooks}"
+        )
+
+        audio_loss = torch.tensor(0.0, device=logits_audio.device)
+        for k in range(n_codebooks):
+            logits_k = logits_audio[:, k, :, :]  # (B, T, audio_vocab_size)
+            labels_k = audio_labels[:, k, :]  # (B, T)
+
+            # Sicherstellen dass nur valide Labels in [0, audio_vocab_size) sind
+            # -100 wird von CrossEntropyLoss ignoriert
+            audio_loss += ce(
+                logits_k.reshape(-1, audio_vocab_size),
+                labels_k.reshape(-1),
+            )
+
+        loss = loss + audio_loss_weight * (audio_loss / n_codebooks)
+
+    return loss

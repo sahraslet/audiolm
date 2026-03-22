@@ -1,14 +1,20 @@
-# !/bin/bash
+#!/bin/bash
+# train.sh
 
-uv run scripts/train.py --dataset_path='data/' \
-    --checkpoint_dir='ckpt/' \
-    --logfile_path='logs/test.log' \
-    --wandb_project_name='Custom Qwen Training Test' \
-    --wandb_entity=tororo \
-    --wandb_run_name='first run kinda excited' \
-    --lr=0.0005 \
-    --device='cpu' \
-    --num_epochs=1 \
-    --eval_every=200 \
-    --save_every=200 \
-    --grad_accumulation_steps=4 \
+uv run python src/audiolm/scripts/train.py \
+    --tokenizer_path Qwen/Qwen2.5-0.5B \
+    --dataset_path data/all \
+    --checkpoint_dir checkpoints \
+    --logfile_path logs/train.log \
+    --wandb_project_name audio-lm \
+    --wandb_entity sahratls-universit-t-des-saarlandes-saarland-university \
+    --wandb_run_name first-run \
+    --lr 3e-4 \
+    --num_epochs 3 \
+    --batch_size 8 \
+    --eval_every 500 \
+    --save_every 500 \
+    --grad_accumulation_steps 4 \
+    --device cuda \
+    --push_to_hub \
+    --hub_repo_id sahara22/audiolm

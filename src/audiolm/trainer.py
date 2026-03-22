@@ -55,22 +55,83 @@ class Trainer:
             config = dataclasses.asdict(config)
         )
 
+    def _prepare_batch(self, batch):
+        """
+        Shift inputs/labels und baue alle Masken auf.
+
+        Returns:
+            text_inputs:    (B, T-1)
+            text_labels:    (B, T-1)     — -100 an Padding- und Audio-Positionen
+            audio_inputs:   (B, K, T-1)
+            audio_labels:   (B, K, T-1)  — -100 an Positionen ohne Audio
+            audio_mask:     (B, T-1) bool
+            attn_mask:      (B, 1, T-1, T-1) causales Masking
+        """
+        text_ids = batch['text_ids'].to(self.device)  # (B, T)
+        audio_codes = batch['audio_codes'].to(self.device)  # (B, K, T)
+        pad_mask = batch['attention_mask'].to(self.device)  # (B, T) — 1=valide
+
+        # --- Shift by 1 ---
+        text_inputs = text_ids[:, :-1]  # (B, T-1)
+        text_labels = text_ids[:, 1:]  # (B, T-1)
+        audio_inputs = audio_codes[:, :, :-1]  # (B, K, T-1)
+        audio_labels = audio_codes[:, :, 1:]  # (B, K, T-1)
+        pad_mask = pad_mask[:, :-1]  # (B, T-1)
+
+        T = text_inputs.size(1)
+
+        # --- Text-Labels maskieren ---
+        # Positionen wo pad_mask==0 → ignorieren
+        text_labels = text_labels.masked_fill(pad_mask == 0, -100)
+        # Audio-Positionen (AUDIO_TOKEN_ID) im Text-Stream → nicht als Text-Loss rechnen
+        audio_pos = text_inputs == self.config.audio_token_id
+        text_labels = text_labels.masked_fill(audio_pos, -100)
+
+        # --- Audio-Labels maskieren ---
+        # -1 in audio_codes bedeutet ∅ (Delay-Padding) → ignorieren
+        audio_labels = audio_labels.masked_fill(audio_labels < 0, -100)
+        # Nicht-Audio-Positionen → ignorieren
+        # (An Text-Positionen sind audio_codes sowieso -1, aber sicherheitshalber)
+        text_pos = ~audio_pos  # (B, T-1)
+        # Für alle K Codebooks: Text-Positionen ignorieren
+        audio_labels = audio_labels.masked_fill(
+            text_pos.unsqueeze(1).expand_as(audio_labels), -100
+        )
+
+        # --- Audio-Mask ---
+        audio_mask = audio_pos  # (B, T-1) bool
+
+        # --- Kausales Attention-Mask ---
+        # Kombiniert: kausales Dreieck + Padding-Mask
+        causal = torch.tril(torch.ones(T, T, device=self.device))  # (T, T)
+        # Padding-Mask auf Keys anwenden: (B, 1, 1, T) * (1, 1, T, T)
+        attn_mask = causal.unsqueeze(0).unsqueeze(0) * pad_mask.unsqueeze(1).unsqueeze(2)
+        # Shape: (B, 1, T, T)
+
+        return text_inputs, text_labels, audio_inputs, audio_labels, audio_mask, attn_mask
 
     def _common_step(self, batch) -> torch.Tensor:
-        input_ids = batch['input_ids'].to(self.device)
-        attention_mask = batch['attention_mask'].to(self.device)
-        inputs = input_ids[:,:-1]
-        attention_mask = attention_mask[:, :-1]
-        targets = input_ids[:,1:]
+        (
+            text_inputs,
+            text_labels,
+            audio_inputs,
+            audio_labels,
+            audio_mask,
+            attn_mask,
+        ) = self._prepare_batch(batch)
 
-        targets = torch.where(
-            attention_mask == 1,
-            targets,
-            torch.tensor(-100, device=self.device)
+        logits_audio, logits_text = self.model(
+            token_ids=text_inputs,
+            audio_codes=audio_inputs,
+            audio_mask=audio_mask,
+            attention_mask=attn_mask,
         )
-        outputs = self.model(inputs, attention_mask)
+
         loss = self.loss_fn(
-            outputs.view(-1, outputs.size(-1)), targets.view(-1)
+            logits_audio=logits_audio,
+            logits_text=logits_text,
+            audio_labels=audio_labels,
+            text_labels=text_labels,
         )
         return loss
 
@@ -109,7 +170,7 @@ class Trainer:
 
                     # --------- Training --------
                     # tokens_seen += (batch['input_ids'].size(0) * batch['input_ids'].size(1))
-                    tokens_seen += batch['input_ids'].numel() # store no. of tokens model has seen in each batch
+                    tokens_seen += batch['text_ids'].numel() + batch['audio_codes'].numel() # store no. of tokens model has seen in each batch
                     self.model.train()
                     
                     loss = self._common_step(batch)
@@ -155,7 +216,7 @@ class Trainer:
     def predict(self, batch):
         raise NotImplementedError
 
-    def save_checkpoint(self):
+    def save_checkpoint(self, push_to_hub: bool = False, repo_id: str = None):
         save_path = f"{self.checkpoint_dir}/checkpoint_epoch-{self.epoch}-step-{self.global_step}.pth"
         torch.save({
             "epoch": self.epoch,
@@ -164,3 +225,24 @@ class Trainer:
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict() if self.scheduler else None,
         }, save_path)
+
+        if push_to_hub and repo_id:
+            from huggingface_hub import HfApi
+            api = HfApi()
+            api.upload_file(
+                path_or_fileobj=save_path,
+                path_in_repo=f"checkpoints/checkpoint_step{self.global_step}.pth",
+                repo_id=repo_id,
+                repo_type="model",
+            )
+            self.logger.info(f"Checkpoint pushed to {repo_id}")
+
+    def load_checkpoint(self, path: str):
+        ckpt = torch.load(path, map_location=self.device)
+        self.model.load_state_dict(ckpt["model"])
+        self.optimizer.load_state_dict(ckpt["optimizer"])
+        if self.scheduler and ckpt["scheduler"]:
+            self.scheduler.load_state_dict(ckpt["scheduler"])
+        self.epoch = ckpt["epoch"]
+        self.global_step = ckpt["global_step"]
+        self.logger.info(f"Resumed from {path} @ epoch {self.epoch} step {self.global_step}")

@@ -1,171 +1,258 @@
 """
 Preprocessing CVSS dataset for Speech-to-Speech Translation (S2ST).
 
-CVSS has two audio streams:
-    - source audio (e.g. English)
-    - target audio (e.g. German)
-
 Output format:
-    Dataset({
-        features: [
-            'input_features',   # [8, T_src] source audio tokens
-            'target_features',  # [8, T_tgt] target audio tokens
-            'labels',           # text token ids of the translation
-            'input_length',     # source audio length in seconds
-            'target_length',    # target audio length in seconds
-            'language_pair',         # language pair e.g. "en_de"
-        ]
-    })
+    text_ids:       List[int]        (T_total,)   — Task-Prefix + audio_token_id Platzhalter
+    audio_codes:    List[List[int]]  (K, T_total) — -1 an Text-Positionen
+    attention_mask: List[int]        (T_total,)
+    input_length:   float
+    language:       str
 
+Template:
+    [S2ST en de] <audio>*T_src OUTPUT: <audio>*T_tgt <eos>
+    flip=True → Richtung umkehren: [S2ST de en] ...
 """
 
 import torch
-from speechtokenizer import SpeechTokenizer
-from transformers import AutoTokenizer
-from datasets import load_dataset, Audio
 import argparse
+from functools import partial
+from speechtokenizer import SpeechTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizer
+from datasets import load_dataset, Dataset, concatenate_datasets, Audio
+from huggingface_hub import hf_hub_download
+from audiolm.functional import apply_delay_pattern
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--path", type=str, required=True, help="HuggingFace dataset path.")
-parser.add_argument("--name", type=str, default=None, help="HuggingFace dataset name (subset), e.g. 'en_de'.")
-parser.add_argument("--split", type=str, default="train", help="Dataset split to use.")
-parser.add_argument("--source_audio_column", type=str, default="audio",
-                    help="Column name for source audio.")
-parser.add_argument("--target_audio_column", type=str, default="target_audio",
-                    help="Column name for target audio.")
-parser.add_argument("--translation_column", type=str, default="translation",
-                    help="Column name for target text translation.")
-parser.add_argument("--speech_tokenizer_config", type=str, default="fnlp/SpeechTokenizer",
-                    help="HuggingFace repo or local path for SpeechTokenizer.")
-parser.add_argument("--speech_tokenizer_ckpt", type=str, default=None,
-                    help="Path to SpeechTokenizer checkpoint (.pt). If None, downloaded from HF hub.")
-parser.add_argument("--text_tokenizer", type=str, default="mistralai/Mistral-7B-v0.1")
-parser.add_argument("--language", type=str, default=None, help="Language pair e.g. 'en_de'.")
-parser.add_argument("--max_duration", type=float, default=30.0,
-                    help="Maximum audio duration in seconds. Applied to both source and target.")
-parser.add_argument("--sampling_rate", type=int, default=16000,
-                    help="Target sampling rate. SpeechTokenizer expects 16kHz.")
-parser.add_argument("--output_dir", type=str, default="./preprocessed/s2st",
-                    help="Output directory to save the preprocessed dataset.")
+parser.add_argument("--path",                    type=str, required=True)
+parser.add_argument("--name",                    type=str, default=None)
+parser.add_argument("--split",                   type=str, default="train")
+parser.add_argument("--source_audio_column",     type=str, default="DE_audio")
+parser.add_argument("--target_audio_column",     type=str, default="EN_audio")
+parser.add_argument("--speech_tokenizer_config", type=str, default="fnlp/SpeechTokenizer")
+parser.add_argument("--speech_tokenizer_ckpt",   type=str, default=None)
+parser.add_argument("--text_tokenizer",          type=str, default="Qwen/Qwen2.5-0.5B")
+parser.add_argument("--src_lang",                type=str, default="en")
+parser.add_argument("--tgt_lang",                type=str, default="de")
+parser.add_argument("--max_duration",            type=float, default=30.0)
+parser.add_argument("--sampling_rate",           type=int, default=16000)
+parser.add_argument("--max_text_length",         type=int, default=32)
+parser.add_argument("--max_audio_length",        type=int, default=1024)
+parser.add_argument("--flip_ratio",              type=float, default=0.5)
+parser.add_argument("--train_test_ratio",        type=float, default=0.05)
+parser.add_argument("--num_proc",                type=int, default=1)
+parser.add_argument("--output_dir",              type=str, default="./preprocessed/s2st")
+parser.add_argument("--audio_vocab_size",        type=int, default=1024)
+parser.add_argument("--n_codebooks",             type=int, default=8)
 args = parser.parse_args()
 
 
-def load_speech_tokenizer(config_path: str, ckpt_path: str | None) -> SpeechTokenizer:
-    """Load SpeechTokenizer from HuggingFace hub or local checkpoint."""
+# =========================
+# LOAD TOKENIZER
+# =========================
+
+def load_speech_tokenizer(config_path, ckpt_path):
     if ckpt_path is not None:
         model = SpeechTokenizer.load_from_checkpoint(config_path, ckpt_path)
     else:
-        from huggingface_hub import hf_hub_download
-
-        config_file = hf_hub_download(
-            repo_id=config_path,
-            filename="speechtokenizer_hubert_avg/config.json"
-        )
-        ckpt_file = hf_hub_download(
-            repo_id=config_path,
-            filename="speechtokenizer_hubert_avg/SpeechTokenizer.pt"
-        )
+        config_file = hf_hub_download(repo_id=config_path, filename="speechtokenizer_hubert_avg/config.json")
+        ckpt_file   = hf_hub_download(repo_id=config_path, filename="speechtokenizer_hubert_avg/SpeechTokenizer.pt")
         model = SpeechTokenizer.load_from_checkpoint(config_file, ckpt_file)
-
     model.eval()
     return model
 
 
-def encode_audio(audio: dict, model: SpeechTokenizer) -> tuple:
-    """
-    Encode a single audio sample into SpeechTokenizer codes.
+# =========================
+# AUDIO ENCODING
+# =========================
 
-    Args:
-        audio: HuggingFace audio dict with keys 'array' and 'sampling_rate'
-        model: SpeechTokenizer model
-
-    Returns:
-        codes: numpy array of shape [8, T]
-        length: audio length in seconds
-    """
-    waveform = torch.tensor(audio["array"], dtype=torch.float32)
-
-    # SpeechTokenizer expects [B, C, T] → [1, 1, T]
-    waveform = waveform.unsqueeze(0).unsqueeze(0)
-
+def encode_audio(audio, model):
+    """Encode audio → (K, T) codes and length in seconds."""
+    waveform = torch.tensor(audio["array"], dtype=torch.float32).unsqueeze(0).unsqueeze(0)
     with torch.no_grad():
-        # codes shape: [n_q, B, T] = [8, 1, T]
-        codes = model.encode(waveform)
-
-    # Drop batch dim → [8, T]
-    codes = codes[:, 0, :].cpu().numpy()
+        codes = model.encode(waveform)  # (K, B, T)
+    codes = codes[:, 0, :].cpu()        # (K, T)
     length = len(audio["array"]) / audio["sampling_rate"]
-
     return codes, length
 
 
-def prepare_dataset(batch, model: SpeechTokenizer, text_tokenizer,
-                    source_col: str, target_col: str, translation_col: str):
-    """
-    Encode source and target audio with SpeechTokenizer and tokenize translation.
+# =========================
+# PREPROCESS
+# =========================
 
-    Args:
-        batch: HuggingFace dataset batch
-        model: SpeechTokenizer model
-        text_tokenizer: text tokenizer for translation labels
-        source_col: column name for source audio
-        target_col: column name for target audio
-        translation_col: column name for target text
-    """
-    # Encode source audio (e.g. English)
-    source_codes, source_length = encode_audio(batch[source_col], model)
-    batch["input_features"] = source_codes       # [8, T_src]
-    batch["input_length"] = source_length
+def preprocess_dataset(
+    dataset,
+    speech_tokenizer,
+    text_tokenizer,
+    src_lang,
+    tgt_lang,
+    source_audio_column,
+    target_audio_column,
+    max_text_length,
+    max_audio_length,
+    num_proc,
+    flip=False,
+):
+    def apply_template(example):
+        bos_token_id   = text_tokenizer.convert_tokens_to_ids("<|audio_bos|>")
+        pad_token_id   = text_tokenizer.convert_tokens_to_ids("<|audio_pad|>")
+        audio_token_id = text_tokenizer.convert_tokens_to_ids("<|audio|>")
 
-    # Encode target audio (e.g. German)
-    target_codes, target_length = encode_audio(batch[target_col], model)
-    batch["target_features"] = target_codes      # [8, T_tgt]
-    batch["target_length"] = target_length
+        assert bos_token_id != text_tokenizer.unk_token_id, "<|audio_bos|> nicht im Vocab!"
+        assert pad_token_id != text_tokenizer.unk_token_id, "<|audio_pad|> nicht im Vocab!"
 
-    # Tokenize translation text as labels
-    batch["labels"] = text_tokenizer(batch[translation_col]).input_ids
+        # 1. Encode beide Audio-Streams → (K, T)
+        src_codes, src_length = encode_audio(example[source_audio_column], speech_tokenizer)
+        tgt_codes, tgt_length = encode_audio(example[target_audio_column], speech_tokenizer)
 
-    return batch
+        # 2. Delay Pattern → (K, T + K - 1), BOS/PAD → -1
+        src_codes_delayed = apply_delay_pattern(src_codes, bos_token_id, pad_token_id)
+        src_codes_delayed[src_codes_delayed == bos_token_id] = -1
+        src_codes_delayed[src_codes_delayed == pad_token_id] = -1
 
+        tgt_codes_delayed = apply_delay_pattern(tgt_codes, bos_token_id, pad_token_id)
+        tgt_codes_delayed[tgt_codes_delayed == bos_token_id] = -1
+        tgt_codes_delayed[tgt_codes_delayed == pad_token_id] = -1
 
-def filter_audio_length(dataset, duration_threshold):
-    """Filter samples where either source or target audio is too long."""
-    def both_in_range(input_length, target_length):
-        return input_length < duration_threshold and target_length < duration_threshold
-    return dataset.filter(both_in_range, input_columns=["input_length", "target_length"])
+        # 3. Flip: Übersetzungsrichtung umkehren
+        if flip:
+            input_lang, output_lang   = tgt_lang, src_lang
+            input_codes, output_codes = tgt_codes_delayed, src_codes_delayed
+            input_length              = tgt_length
+        else:
+            input_lang, output_lang   = src_lang, tgt_lang
+            input_codes, output_codes = src_codes_delayed, tgt_codes_delayed
+            input_length              = src_length
 
+        # 4. Truncaten auf max_audio_length
+        K            = input_codes.shape[0]
+        input_codes  = input_codes[:,  :max_audio_length]
+        output_codes = output_codes[:, :max_audio_length]
+        T_src        = input_codes.shape[1]
+        T_tgt        = output_codes.shape[1]
 
-def make_s2st_dataset(args: argparse.Namespace) -> None:
-    assert args.sampling_rate == 16000, "SpeechTokenizer requires 16kHz audio."
+        # 5. Task-Prefix tokenisieren
+        task_prefix = text_tokenizer(
+            f"[S2ST {input_lang} {output_lang}] ",
+            add_special_tokens=False
+        ).input_ids[:max_text_length]
 
-    model = load_speech_tokenizer(args.speech_tokenizer_config, args.speech_tokenizer_ckpt)
-    text_tokenizer = AutoTokenizer.from_pretrained(args.text_tokenizer)
+        output_sep = text_tokenizer(" OUTPUT: ", add_special_tokens=False).input_ids
+        eos        = [text_tokenizer.eos_token_id]
 
-    dataset = load_dataset(args.path, args.name, split=args.split)
+        # 6. Flacher text_ids Stream:
+        #    [S2ST en de] <audio>*T_src OUTPUT: <audio>*T_tgt <eos>
+        T_pre = len(task_prefix)
+        T_sep = len(output_sep)
 
-    # Resample both audio columns to 16kHz
-    dataset = dataset.cast_column(args.source_audio_column, Audio(sampling_rate=args.sampling_rate))
-    dataset = dataset.cast_column(args.target_audio_column, Audio(sampling_rate=args.sampling_rate))
+        text_ids = (
+            task_prefix
+            + [audio_token_id] * T_src
+            + output_sep
+            + [audio_token_id] * T_tgt
+            + eos
+        )
 
-    dataset = dataset.map(
-        lambda batch: prepare_dataset(
-            batch, model, text_tokenizer,
-            source_col=args.source_audio_column,
-            target_col=args.target_audio_column,
-            translation_col=args.translation_column,
-        ),
+        T_total = len(text_ids)
+        T_mid   = T_pre + T_src + T_sep  # Start Output-Audio
+
+        # 7. audio_codes: (K, T_total), -1 an Text-Positionen
+        audio_codes_full = torch.full((K, T_total), -1, dtype=torch.long)
+        audio_codes_full[:, T_pre : T_pre + T_src] = input_codes
+        audio_codes_full[:, T_mid : T_mid + T_tgt] = output_codes
+
+        attention_mask = [1] * T_total
+
+        return {
+            "text_ids":       text_ids,
+            "audio_codes":    audio_codes_full.tolist(),
+            "attention_mask": attention_mask,
+            "input_length":   input_length,
+        }
+
+    return dataset.map(
+        apply_template,
+        batched=False,
         remove_columns=dataset.column_names,
+        num_proc=num_proc,
     )
 
-    dataset = filter_audio_length(dataset, args.max_duration)
-    dataset = dataset.map(lambda _: {"language": args.language})
 
-    dataset.save_to_disk(args.output_dir)
+# =========================
+# FILTER
+# =========================
 
-    print(f"Saved {len(dataset)} samples → {args.output_dir}")
-    print(dataset)
+def filter_audio_length(dataset, duration_threshold):
+    return dataset.filter(lambda x: x < duration_threshold, input_columns=["input_length"])
+
+
+# =========================
+# MAIN PIPELINE
+# =========================
+
+def create_datasets(args):
+    assert args.sampling_rate == 16000, "SpeechTokenizer requires 16kHz audio."
+
+    print("Loading tokenizers...")
+    speech_tokenizer = load_speech_tokenizer(args.speech_tokenizer_config, args.speech_tokenizer_ckpt)
+    text_tokenizer   = AutoTokenizer.from_pretrained(args.text_tokenizer)
+    special_tokens = ["<|audio|>", "<|audio_bos|>", "<|audio_pad|>"]
+    text_tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
+
+    # Checken ob es geklappt hat:
+    for t in special_tokens:
+        tid = text_tokenizer.convert_tokens_to_ids(t)
+        print(f"{t} → {tid}")
+
+    print("Loading dataset...")
+    dataset = load_dataset(args.path, split=args.split)
+    dataset = dataset.filter(lambda x: x["score"] >= 0.8)
+    print(f"Nach Score-Filter (>= 0.8): {len(dataset)} Samples")
+    dataset = dataset.cast_column(args.source_audio_column, Audio(sampling_rate=args.sampling_rate))
+    dataset = dataset.cast_column(args.target_audio_column, Audio(sampling_rate=args.sampling_rate))
+    print(f"Dataset size: {len(dataset)}")
+
+    flip_split = int(args.flip_ratio * len(dataset))
+    indices    = list(range(len(dataset)))
+    flip_ds    = dataset.select(indices[:flip_split])
+    no_flip_ds = dataset.select(indices[flip_split:])
+
+    common_kwargs = dict(
+        speech_tokenizer=speech_tokenizer,
+        text_tokenizer=text_tokenizer,
+        src_lang=args.src_lang,
+        tgt_lang=args.tgt_lang,
+        source_audio_column=args.source_audio_column,
+        target_audio_column=args.target_audio_column,
+        max_text_length=args.max_text_length,
+        max_audio_length=args.max_audio_length,
+        num_proc=args.num_proc,
+    )
+
+    print(f"Processing flipped ({args.tgt_lang}→{args.src_lang})...")
+    flipped_dataset   = preprocess_dataset(flip_ds,   **common_kwargs, flip=True)
+
+    print(f"Processing normal ({args.src_lang}→{args.tgt_lang})...")
+    unflipped_dataset = preprocess_dataset(no_flip_ds, **common_kwargs, flip=False)
+
+    print("Merging + shuffling...")
+    generated_dataset = concatenate_datasets([flipped_dataset, unflipped_dataset]).shuffle(seed=1337)
+
+    print("Filtering by audio duration...")
+    generated_dataset = filter_audio_length(generated_dataset, args.max_duration)
+    generated_dataset = generated_dataset.map(lambda _: {"language": f"{args.src_lang}_{args.tgt_lang}"})
+
+    print("Train/val split...")
+    split_dataset = generated_dataset.train_test_split(test_size=args.train_test_ratio, seed=1337)
+    split_dataset["validation"] = split_dataset.pop("test")
+
+    print(f"Saving to {args.output_dir}...")
+    split_dataset.save_to_disk(args.output_dir)
+    print(f"Saved {len(generated_dataset)} samples → {args.output_dir}")
+    print(split_dataset)
+    open(f"{args.output_dir}/.done", "w").close()
+    print("Done flag set.")
 
 
 if __name__ == "__main__":
-    make_s2st_dataset(args)
+    create_datasets(args)

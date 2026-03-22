@@ -58,8 +58,8 @@ def preprocess_dataset(
             return_tensors=None
         )
         return {
-            'text' : text,
-            **tokenized
+            'text_ids': tokenized['input_ids'],
+            'attention_mask': tokenized['attention_mask']
         }
     
     if flip:
@@ -124,8 +124,17 @@ def create_datasets(args: argparse.Namespace):
 
     split_dataset = generated_dataset.train_test_split(test_size=args.train_test_ratio, seed=1337)
     split_dataset['validation'] = split_dataset.pop('test')
-    
+
+    # for compatibility when concateniting with audio datasets, we add empty audio codes
+    def add_empty_audio(example):
+        T = len(example["text_ids"])
+        example["audio_codes"] = [[-1] * T for _ in range(8)]
+        return example
+
+    split_dataset = split_dataset.map(add_empty_audio)
     split_dataset.save_to_disk(args.data_dir)
+    open(f"{args.output_dir}/.done", "w").close()
+    print("Done flag set.")
 
 
 create_datasets(args=args)
