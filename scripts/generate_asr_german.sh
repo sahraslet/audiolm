@@ -2,7 +2,9 @@
 # Script to preprocess audio data for ASR tasks using a Python script.
 # German asr dataset
 
-uv run python src/audiolm/asr_preprocessing.py \
+source /nethome/sslet/audiolm/.venv/bin/activate
+
+python src/audiolm/asr_preprocessing.py \
     --path='flozi00/asr-german-mixed' \
     --split='train[10:]' \
     --text_column='transkription' \
@@ -10,5 +12,5 @@ uv run python src/audiolm/asr_preprocessing.py \
     --text_tokenizer='Qwen/Qwen2.5-0.5B' \
     --language='de' \
     --max_duration=30.0 \
-    --output_dir='data/asr_german' \
+    --output_dir='/data/users/sslet/audiolm/data/asr_german' \
     --sampling_rate=16000

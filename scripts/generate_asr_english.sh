@@ -3,7 +3,9 @@
 
 # English asr dataset
 
-uv run python src/audiolm/asr_preprocessing.py \
+source /nethome/sslet/audiolm/.venv/bin/activate
+
+python src/audiolm/asr_preprocessing.py \
     --path='openslr/librispeech_asr' \
     --name='clean' \
     --split='train[:10%]' \
@@ -12,7 +14,7 @@ uv run python src/audiolm/asr_preprocessing.py \
     --text_tokenizer='Qwen/Qwen2.5-0.5B'
     --language='en' \
     --max_duration=30.0 \
-    --output_dir='data/' \
+    --output_dir='/data/users/sslet/audiolm/data/asr_english' \
     --sampling_rate=16000
 
 

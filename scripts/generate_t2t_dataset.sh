@@ -1,6 +1,8 @@
 #!/bin/bash
 
-uv run scripts/generate_t2t_dataset.py \
+source /nethome/sslet/audiolm/.venv/bin/activate
+
+python scripts/generate_t2t_dataset.py \
     --dataset_name='Darth-Vaderr/English-German' \
     --split="train[:30%]" \
     --flip_ratio=0.5 \
@@ -10,4 +12,4 @@ uv run scripts/generate_t2t_dataset.py \
     --train_test_ratio=0.1 \
     --max_length=128 \
     --tokenizer='Qwen/Qwen2.5-0.5B' \
-    --data_dir'=data/t2t'
+    --data_dir='/data/users/sslet/audiolm/data/t2t'

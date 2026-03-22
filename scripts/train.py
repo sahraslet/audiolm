@@ -132,16 +132,8 @@ if args.model_checkpoint is not None:
 # ===========================================================================
 
 print(f"Loading dataset from {args.dataset_path}...")
-# Am Anfang von train.py vor dem load_from_disk:
-from huggingface_hub import snapshot_download
-local_path = snapshot_download(
-    repo_id="sahara22/asr_librispeech_subset",
-    repo_type="dataset"
-)
-# Dann:
-ds = load_from_disk(f"{local_path}/processed")
-ds.set_format("torch", columns=["text_ids", "audio_codes", "attention_mask"])  # ← hinzufügen
-
+ds = load_from_disk(args.dataset_path)
+ds.set_format("torch", columns=["text_ids", "audio_codes", "attention_mask"])
 
 train_ds = ds["train"]
 val_ds   = ds["validation"]

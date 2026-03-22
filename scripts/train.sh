@@ -1,11 +1,13 @@
 #!/bin/bash
 # train.sh
 
-uv run python src/audiolm/scripts/train.py \
+source /nethome/sslet/audiolm/.venv/bin/activate
+
+python src/audiolm/scripts/train.py \
     --tokenizer_path Qwen/Qwen2.5-0.5B \
-    --dataset_path data/all \
-    --checkpoint_dir checkpoints \
-    --logfile_path logs/train.log \
+    --dataset_path /data/users/sslet/audiolm/data/all \
+    --checkpoint_dir /data/users/sslet/audiolm/checkpoints \
+    --logfile_path /data/users/sslet/audiolm/logs/train.log \
     --wandb_project_name audio-lm \
     --wandb_entity sahratls-universit-t-des-saarlandes-saarland-university \
     --wandb_run_name first-run \
