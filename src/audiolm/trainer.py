@@ -34,6 +34,7 @@ class Trainer:
         self.config = config
         self.epoch: int = 0
         self.global_step: int = 0
+        self.scaler = torch.cuda.amp.GradScaler()
 
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(logging.INFO)
@@ -120,19 +121,19 @@ class Trainer:
             attn_mask,
         ) = self._prepare_batch(batch)
 
-        logits_audio, logits_text = self.model(
-            token_ids=text_inputs,
-            audio_codes=audio_inputs,
-            audio_mask=audio_mask,
-            attention_mask=attn_mask,
-        )
-
-        loss = self.loss_fn(
-            logits_audio=logits_audio,
-            logits_text=logits_text,
-            audio_labels=audio_labels,
-            text_labels=text_labels,
-        )
+        with torch.cuda.amp.autocast():
+            logits_audio, logits_text = self.model(
+                token_ids=text_inputs,
+                audio_codes=audio_inputs,
+                audio_mask=audio_mask,
+                attention_mask=attn_mask,
+            )
+            loss = self.loss_fn(
+                logits_audio=logits_audio,
+                logits_text=logits_text,
+                audio_labels=audio_labels,
+                text_labels=text_labels,
+            )
         return loss
 
 
@@ -174,24 +175,23 @@ class Trainer:
                     self.model.train()
                     
                     loss = self._common_step(batch)
-                    loss_scaled = loss / grad_accumulation_steps
-                    loss_scaled.backward()
-                    
+                    self.scaler.scale(loss / grad_accumulation_steps).backward()
 
                     if ((idx + 1) % grad_accumulation_steps == 0) or (idx + 1 == len(train_dataloader)):
+                        self.scaler.unscale_(self.optimizer)
                         torch.nn.utils.clip_grad_norm_(
                             self.model.parameters(),
                             max_norm=grad_clip_max_norm
                         )
-                        
-                        self.optimizer.step()
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
                         self.optimizer.zero_grad(set_to_none=True)
                         if self.scheduler:
                             self.scheduler.step()
 
                     self.global_step += 1
                     epoch_steps += 1
-                    total_loss += loss_scaled.item()
+                    total_loss += (loss / grad_accumulation_steps).item()
 
                     current_lr = self.optimizer.param_groups[0]['lr']
                     self.logger.info(f"Train epoch: {self.epoch} step: {self.global_step} Tokens seen: {tokens_seen} Train Loss: {loss.item()}")

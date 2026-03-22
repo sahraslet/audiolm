@@ -10,8 +10,8 @@ uv run python src/audiolm/scripts/train.py \
     --wandb_entity sahratls-universit-t-des-saarlandes-saarland-university \
     --wandb_run_name first-run \
     --lr 3e-4 \
-    --num_epochs 3 \
-    --batch_size 8 \
+    --num_epochs 2 \
+    --batch_size 4 \
     --eval_every 500 \
     --save_every 500 \
     --grad_accumulation_steps 4 \
