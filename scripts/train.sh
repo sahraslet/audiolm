@@ -1,9 +1,7 @@
 #!/bin/bash
 # train.sh
 
-source /nethome/sslet/audiolm/.venv/bin/activate
-
-python src/audiolm/scripts/train.py \
+/.venv/bin/python audiolm/scripts/train.py \
     --tokenizer_path Qwen/Qwen2.5-0.5B \
     --dataset_path /data/users/sslet/audiolm/data/all \
     --checkpoint_dir /data/users/sslet/audiolm/checkpoints \
