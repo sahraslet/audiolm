@@ -28,7 +28,7 @@ parser.add_argument("--logfile_path",        type=str, required=True)
 parser.add_argument("--wandb_project_name",  type=str, required=True)
 parser.add_argument("--wandb_entity",        type=str, required=True)
 parser.add_argument("--wandb_run_name",      type=str, required=True)
-parser.add_argument("--lr",                  type=float, default=3e-4)
+parser.add_argument("--lr",                  type=float, default=5e-5)
 parser.add_argument("--device",              type=str, default="cuda")
 parser.add_argument("--num_epochs",          type=int, default=1)
 parser.add_argument("--eval_every",          type=int, default=5000)
@@ -111,6 +111,7 @@ new_emb = nn.Embedding(total_vocab_size, cfg.d_model, padding_idx=cfg.pad_token_
 print(f"qwen_embed_size: {qwen_vocab_size}")
 print(f"old_emb.weight.shape: {old_emb.weight.shape}")
 new_emb.weight.data[:qwen_vocab_size] = old_emb.weight.data
+nn.init.normal_(new_emb.weight.data[qwen_vocab_size:], mean=0.0, std=0.02)
 model.model.model.embed_tokens = new_emb
 model.model.lm_head.weight = new_emb.weight  # weight-tying
 
