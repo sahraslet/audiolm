@@ -35,10 +35,8 @@ open(f"{args.output_dir}/.done", "w").close()
 
 print(f"Saved merged dataset → {args.output_dir}")
 print(f"Train: {len(full_train)} | Val: {len(full_val)}")
+print(f"Train: {len(full_train)} | Val: {len(full_val)}")
 if args.push_to_hub:
-    print("Pushing validation split to HuggingFace...")
-    full_ds["validation"].push_to_hub(
-        args.hub_repo_id,
-        split="validation",
-    )
-    print(f"Validation split pushed to {args.hub_repo_id}")
+    print("Pushing dataset to HuggingFace...")
+    full_ds.push_to_hub(args.hub_repo_id)
+    print(f"Dataset pushed to {args.hub_repo_id}")

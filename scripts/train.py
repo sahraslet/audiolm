@@ -11,7 +11,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 import argparse
 import torch
-from datasets import load_from_disk
+from datasets import load_dataset
 from torch.utils.data import DataLoader
 
 
@@ -132,7 +132,7 @@ if args.model_checkpoint is not None:
 # ===========================================================================
 
 print(f"Loading dataset from {args.dataset_path}...")
-ds = load_from_disk(args.dataset_path)
+ds = load_dataset(args.dataset_path)
 ds.set_format("torch", columns=["text_ids", "audio_codes", "attention_mask"])
 
 train_ds = ds["train"]

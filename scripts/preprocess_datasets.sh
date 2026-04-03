@@ -30,7 +30,7 @@ echo "=== Merging datasets ==="
 if [ -f "data/all/.done" ]; then
     echo "Skipping merge — already done."
 else
-    uv run python src/audiolm/merge_datasets.py \
+    python src/audiolm/merge_datasets.py \
         --input_dirs data/asr_english data/asr_german data/s2st data/t2t \
         --output_dir data/all \
         --seed 1337 \

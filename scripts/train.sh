@@ -5,7 +5,7 @@ source /nethome/sslet/audiolm/.venv/bin/activate
 
 python src/audiolm/scripts/train.py \
     --tokenizer_path Qwen/Qwen2.5-0.5B \
-    --dataset_path /data/users/sslet/audiolm/data/all \
+    --dataset_path "sahara22/audiolm-eval" \
     --checkpoint_dir /data/users/sslet/audiolm/checkpoints \
     --logfile_path /data/users/sslet/audiolm/logs/train.log \
     --wandb_project_name audio-lm \
