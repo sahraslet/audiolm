@@ -4,6 +4,8 @@ from audiolm.trainer import Trainer
 from audiolm.functional import audio_lm_loss
 from datacollator import AudioLMCollator
 import torch.nn as nn
+import os 
+import glob
 
 
 from functools import partial
@@ -13,6 +15,8 @@ import argparse
 import torch
 from datasets import load_dataset
 from torch.utils.data import DataLoader
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
 
 
 # ===========================================================================
@@ -33,9 +37,9 @@ parser.add_argument("--device",              type=str, default="cuda")
 parser.add_argument("--num_epochs",          type=int, default=1)
 parser.add_argument("--eval_every",          type=int, default=5000)
 parser.add_argument("--save_every",          type=int, default=5000)
-parser.add_argument("--grad_accumulation_steps", type=int, default=1)
-parser.add_argument("--batch_size",          type=int, default=2)
-parser.add_argument("--push_to_hub",   action="store_true", default=False)
+parser.add_argument("--grad_accumulation_steps", type=int, default=16)
+parser.add_argument("--batch_size",          type=int, default=1)
+parser.add_argument("--push_to_hub",   action="store_true", default=True)
 parser.add_argument("--hub_repo_id",   type=str, default=None)
 
 args = parser.parse_args()
@@ -48,10 +52,6 @@ os.makedirs(os.path.dirname(args.logfile_path), exist_ok=True)
 # ===========================================================================
 
 tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
-tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
-qwen = AutoModelForCausalLM.from_pretrained(args.tokenizer_path)
-qwen_vocab_size = qwen.model.embed_tokens.weight.shape[0]  # 151936
-print(f"Tokenizer vocab: {len(tokenizer)} | Embedding size: {qwen_vocab_size}")
 
 special_tokens = ["<|audio|>", "<|audio_bos|>", "<|audio_pad|>"]
 tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
@@ -59,13 +59,18 @@ tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
 for t in special_tokens:
     print(f"{t} → {tokenizer.convert_tokens_to_ids(t)}")
 
-# vocab_size nach add_special_tokens — embed_tokens muss darauf resized werden
-total_vocab_size = qwen_vocab_size + len(special_tokens)  # 151936 + 3 = 151939
+# ===========================================================================
+# load qwen
+# ===========================================================================
+
+qwen = AutoModelForCausalLM.from_pretrained(args.tokenizer_path)
+qwen_vocab_size = qwen.model.embed_tokens.weight.shape[0]  # 151936
+total_vocab_size = len(special_tokens)  + qwen_vocab_size                       
+print(f"Tokenizer vocab: {len(tokenizer)} | Qwen embed size: {qwen_vocab_size}")
 print(f"Total vocab size: {total_vocab_size}")
 
-
 # ===========================================================================
-# Config
+# Config 
 # ===========================================================================
 
 cfg = QwenConfig(
@@ -79,8 +84,8 @@ cfg = QwenConfig(
     rmsnorm_eps=1e-06,
     rope_theta=1000000.0,
     dropout=0.0,
-    vocab_size=qwen_vocab_size,       # Qwen embed_tokens size
-    text_vocab_size=total_vocab_size,  # für AudioLM assert + Loss
+    vocab_size=qwen_vocab_size,        # ✅ Originalgröße für Load
+    text_vocab_size=qwen_vocab_size,   # ✅ gleich, wird unten geupdatet
     activation='silu',
     pad_token_id=tokenizer.pad_token_id,
     audio_token_id=tokenizer.convert_tokens_to_ids("<|audio|>"),
@@ -89,43 +94,40 @@ cfg = QwenConfig(
     n_codebooks=8,
 )
 
-
 # ===========================================================================
-# Modell
+# Model + Qwen Weights 
 # ===========================================================================
 
 model = AudioLM(cfg)
 
-
-# 2. Pretrained Qwen Weights laden (nur Backbone, neue Parameter bleiben zufällig)
 print("Loading pretrained Qwen weights...")
-qwen = AutoModelForCausalLM.from_pretrained(args.tokenizer_path)
 missing, unexpected = model.model.load_state_dict(qwen.state_dict(), strict=False)
 print(f"Missing keys (neue Parameter, erwartet): {len(missing)}")
 print(f"Unexpected keys: {len(unexpected)}")
-del qwen  # VRAM freigeben
+del qwen  # ✅ VRAM freigeben – wird nicht mehr gebraucht
 
-# 5. Embeddings auf neue Größe erweitern
+
+# ===========================================================================
+# Embeddings Resize
+# ===========================================================================
+
 old_emb = model.model.model.embed_tokens
 new_emb = nn.Embedding(total_vocab_size, cfg.d_model, padding_idx=cfg.pad_token_id)
-print(f"qwen_embed_size: {qwen_vocab_size}")
+print(f"qwen_embed_size:      {qwen_vocab_size}")
 print(f"old_emb.weight.shape: {old_emb.weight.shape}")
+
 new_emb.weight.data[:qwen_vocab_size] = old_emb.weight.data
 nn.init.normal_(new_emb.weight.data[qwen_vocab_size:], mean=0.0, std=0.02)
+
 model.model.model.embed_tokens = new_emb
 model.model.lm_head.weight = new_emb.weight  # weight-tying
 
-# Config updaten
+# ✅ Config nachträglich auf finale Größe updaten
 cfg.vocab_size = total_vocab_size
 cfg.text_vocab_size = total_vocab_size
+print(f"cfg.vocab_size final: {cfg.vocab_size}")
 #cfg.audio_token_id = tokenizer.convert_tokens_to_ids("<|audio|>")
 
-# 3. Optionaler eigener Checkpoint (Resume Training)
-if args.model_checkpoint is not None:
-    print(f"Resuming from checkpoint: {args.model_checkpoint}")
-    ckpt = torch.load(args.model_checkpoint, map_location="cpu", weights_only=True)
-    model.load_state_dict(ckpt["model"])
-    print("Checkpoint loaded successfully")
 
 
 # ===========================================================================
@@ -198,9 +200,18 @@ trainer = Trainer(
     hub_repo_id=args.hub_repo_id,
 )
 
-# Resume Trainer-State falls Checkpoint vorhanden
+# use available ccheckpoint
 if args.model_checkpoint is not None:
-    trainer.load_checkpoint(args.model_checkpoint)
+    resume_path = args.model_checkpoint
+else:
+    checkpoints = sorted(glob.glob(f"{args.checkpoint_dir}/checkpoint_epoch-*.pth"))
+    resume_path = checkpoints[-1] if checkpoints else None
+
+if resume_path is not None:
+    print(f"Resuming from: {resume_path}")
+    trainer.load_checkpoint(resume_path)
+else:
+    print("No checkpoint found, starting from scratch")
 
 
 # ===========================================================================
