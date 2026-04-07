@@ -239,19 +239,17 @@ def audio_lm_loss(
         logits_text:   (B, T, text_vocab_size)
         text_labels:   (B, T)                          ← -100 = ignore
 
-    Audio-Labels müssen NICHT offset-kodiert sein — sie sind raw [0, audio_vocab_size).
-    apply_audio_offset() wird nur für das interleaved flat-token-stream Format benötigt,
-    nicht für separate Codebook-Heads.
     """
     ce = nn.CrossEntropyLoss(ignore_index=-100)
 
     # --- Text Loss ---
     # logits_text: (B, T, V) → (B*T, V);  text_labels: (B*T,)
-    loss = text_loss_weight * ce(
+    text_only_loss = ce(
         logits_text.reshape(-1, logits_text.size(-1)),
         text_labels.reshape(-1),
     )
-
+    loss = text_only_loss
+    audio_only_loss = torch.tensor(0.0, device= logits_text.device)
     # --- Audio Loss (K codebooks) ---
     if logits_audio is not None and audio_labels is not None:
         # logits_audio: (B, K, T, audio_vocab_size)
@@ -263,18 +261,20 @@ def audio_lm_loss(
             f"audio_labels.shape[1]={audio_labels.shape[1]} != n_codebooks={n_codebooks}"
         )
 
-        audio_loss = torch.tensor(0.0, device=logits_audio.device)
+        raw_audio_loss = torch.tensor(0.0, device=logits_audio.device)
         for k in range(n_codebooks):
             logits_k = logits_audio[:, k, :, :]  # (B, T, audio_vocab_size)
             labels_k = audio_labels[:, k, :]  # (B, T)
 
             # Sicherstellen dass nur valide Labels in [0, audio_vocab_size) sind
             # -100 wird von CrossEntropyLoss ignoriert
-            audio_loss += ce(
+            raw_audio_loss += ce(
                 logits_k.reshape(-1, audio_vocab_size),
                 labels_k.reshape(-1),
             )
 
-        loss = loss + audio_loss_weight * (audio_loss / n_codebooks)
+        audio_only_loss = (raw_audio_loss / n_codebooks)
+    loss = text_loss_weight*text_only_loss + audio_loss_weight*audio_only_loss
 
-    return loss
+
+    return loss, text_only_loss, audio_only_loss
