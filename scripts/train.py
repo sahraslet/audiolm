@@ -6,7 +6,7 @@ from datacollator import AudioLMCollator
 import torch.nn as nn
 import os 
 import glob
-
+from torch.optim.lr_scheduler import LinearLR
 
 from functools import partial
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -84,8 +84,8 @@ cfg = QwenConfig(
     rmsnorm_eps=1e-06,
     rope_theta=1000000.0,
     dropout=0.0,
-    vocab_size=qwen_vocab_size,        # ✅ Originalgröße für Load
-    text_vocab_size=qwen_vocab_size,   # ✅ gleich, wird unten geupdatet
+    vocab_size=qwen_vocab_size,       
+    text_vocab_size=qwen_vocab_size,   
     activation='silu',
     pad_token_id=tokenizer.pad_token_id,
     audio_token_id=tokenizer.convert_tokens_to_ids("<|audio|>"),
@@ -122,7 +122,11 @@ nn.init.normal_(new_emb.weight.data[qwen_vocab_size:], mean=0.0, std=0.02)
 model.model.model.embed_tokens = new_emb
 model.model.lm_head.weight = new_emb.weight  # weight-tying
 
-# ✅ Config nachträglich auf finale Größe updaten
+nn.init.normal_(model.audio_lm_head.weight, mean = 0.0, std=0.02)
+for k in range(cfg.n_codebooks):
+    nn.init.normal_(model.audio_embed[k].weight, mean=0.0, std=0.02)
+
+
 cfg.vocab_size = total_vocab_size
 cfg.text_vocab_size = total_vocab_size
 print(f"cfg.vocab_size final: {cfg.vocab_size}")
@@ -180,6 +184,13 @@ optimizer = torch.optim.AdamW(
     betas=(0.9, 0.95),
 )
 
+scheduler = LinearLR(
+    optimizer,
+    start_factor=0.1,
+    end_factor=1.0,
+    total_iters=1000
+)
+
 
 # ===========================================================================
 # Trainer
@@ -195,6 +206,7 @@ trainer = Trainer(
     model=model,
     loss_fn=loss_fn,
     optimizer=optimizer,
+    scheduler=scheduler,
     device=args.device,
     push_to_hub=args.push_to_hub,
     hub_repo_id=args.hub_repo_id,
