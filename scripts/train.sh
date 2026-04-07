@@ -19,4 +19,4 @@ python src/audiolm/scripts/train.py \
     --grad_accumulation_steps 4 \
     --device cuda \
     --push_to_hub \
-    --hub_repo_id sahara22/audiolm
+    --hub_repo_id sahara22/audio_language_model
