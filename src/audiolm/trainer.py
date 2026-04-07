@@ -6,6 +6,7 @@ from tqdm import tqdm
 import dataclasses
 import torch
 import torch.nn as nn
+import os
 
 
 class Trainer:
@@ -23,6 +24,8 @@ class Trainer:
             scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
             # compile: bool = True,
             device: str | None = "cuda",
+            push_to_hub: bool | None = False,
+            hub_repo_id: str | None = None
     ) -> None:
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         self.model = model.to(self.device)
@@ -34,7 +37,7 @@ class Trainer:
         self.config = config
         self.epoch: int = 0
         self.global_step: int = 0
-        self.scaler = torch.cuda.amp.GradScaler()
+        self.scaler = torch.amp.GradScaler()
 
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(logging.INFO)
@@ -55,6 +58,9 @@ class Trainer:
             name=wandb_run_name,
             config = dataclasses.asdict(config)
         )
+
+        self.push_to_hub = push_to_hub
+        self.hub_repo_id = hub_repo_id
 
     def _prepare_batch(self, batch):
         """
@@ -92,7 +98,6 @@ class Trainer:
         # -1 in audio_codes bedeutet ∅ (Delay-Padding) → ignorieren
         audio_labels = audio_labels.masked_fill(audio_labels < 0, -100)
         # Nicht-Audio-Positionen → ignorieren
-        # (An Text-Positionen sind audio_codes sowieso -1, aber sicherheitshalber)
         text_pos = ~audio_pos  # (B, T-1)
         # Für alle K Codebooks: Text-Positionen ignorieren
         audio_labels = audio_labels.masked_fill(
@@ -121,31 +126,36 @@ class Trainer:
             attn_mask,
         ) = self._prepare_batch(batch)
 
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast('cuda'):
             logits_audio, logits_text = self.model(
                 token_ids=text_inputs,
                 audio_codes=audio_inputs,
                 audio_mask=audio_mask,
                 attention_mask=attn_mask,
             )
-            loss = self.loss_fn(
+            loss, text_loss, audio_loss = self.loss_fn(
                 logits_audio=logits_audio,
                 logits_text=logits_text,
                 audio_labels=audio_labels,
                 text_labels=text_labels,
             )
-        return loss
+        return loss, text_loss, audio_loss
 
 
     def evaluate(self, val_dataloader) -> float:
         self.model.eval()
         total_loss = 0.0
+        total_text_loss = 0.0
+        total_audio_loss = 0.0
         with torch.no_grad():
             for batch in val_dataloader:
-                loss = self._common_step(batch)
+                loss, text_loss, audio_loss  = self._common_step(batch)
                 total_loss += loss.item()
+                total_text_loss += text_loss.item()
+                total_audio_loss += audio_loss.item()
+        n = len(val_dataloader)
 
-        return total_loss / len(val_dataloader)
+        return total_loss / n, total_text_loss / n, total_audio_loss / n
 
 
     def train(
@@ -162,9 +172,13 @@ class Trainer:
         for epoch in range(self.epoch, num_epochs):
             self.epoch = epoch
             total_loss = 0.0
+            total_text_loss = 0.0
+            total_audio_loss = 0.0
             tokens_seen = 0
             epoch_steps = 0
             val_loss = None
+            val_text_loss = None
+            val_audio_loss = None
 
             with tqdm(total=len(train_dataloader), desc=f"Training Epoch {self.epoch}", dynamic_ncols=True) as pbar:
                 for idx, batch in enumerate(train_dataloader):
@@ -174,7 +188,7 @@ class Trainer:
                     tokens_seen += batch['text_ids'].numel() + batch['audio_codes'].numel() # store no. of tokens model has seen in each batch
                     self.model.train()
                     
-                    loss = self._common_step(batch)
+                    loss, text_loss, audio_loss = self._common_step(batch)
                     self.scaler.scale(loss / grad_accumulation_steps).backward()
 
                     if ((idx + 1) % grad_accumulation_steps == 0) or (idx + 1 == len(train_dataloader)):
@@ -192,25 +206,27 @@ class Trainer:
                     self.global_step += 1
                     epoch_steps += 1
                     total_loss += (loss / grad_accumulation_steps).item()
+                    total_text_loss += (text_loss / grad_accumulation_steps).item()
+                    total_audio_loss += (audio_loss / grad_accumulation_steps).item()
 
                     current_lr = self.optimizer.param_groups[0]['lr']
                     self.logger.info(f"Train epoch: {self.epoch} step: {self.global_step} Tokens seen: {tokens_seen} Train Loss: {loss.item()}")
-                    wandb.log({'train_loss': loss.item(), 'tokens_seen': tokens_seen, 'lr': current_lr, 'epoch': self.epoch, 'step': self.global_step}, step=self.global_step)
+                    wandb.log({'train_loss': loss.item(), 'tokens_seen': tokens_seen, 'lr': current_lr, 'epoch': self.epoch, 'step': self.global_step, 'train_loss_text': text_loss.item(), 'train_loss_audio':audio_loss.item()}, step=self.global_step)
                 
                     # --------- evaluation ---------
                     if self.global_step % eval_every == 0 and val_dataloader and self.global_step > 0 or epoch_steps == len(train_dataloader):
-                        val_loss = self.evaluate(val_dataloader)
+                        val_loss, val_text_loss, val_audio_loss = self.evaluate(val_dataloader)
                         self.logger.info(f"Eval Step: {self.global_step} Tokens seen: {tokens_seen} Val Loss : {val_loss}")
-                        wandb.log({'val_loss': val_loss, 'tokens_seen': tokens_seen, 'epoch': self.epoch, 'step': self.global_step}, step=self.global_step)
+                        wandb.log({'val_loss': val_loss, 'tokens_seen': tokens_seen, 'epoch': self.epoch, 'step': self.global_step, 'val_text_loss': val_text_loss, 'val_audio_loss': val_audio_loss}, step=self.global_step)
 
                     # --------- checkpointing ---------
                     if self.global_step % save_every == 0:
-                        self.save_checkpoint()
+                        self.save_checkpoint(push_to_hub=self.push_to_hub, repo_id=self.hub_repo_id)
                         self.logger.info(f"Checkpoint Saved | Train loss: {loss} | Eval loss: {val_loss}")
 
                     pbar.set_description(f"Train Loss step : {loss.item():.4f} | Val Loss : {val_loss}")
                     pbar.update(1)
-                self.logger.info(f"Epoch {self.epoch} ended with train loss {total_loss / epoch_steps} validation loss {val_loss}")
+                self.logger.info(f"Epoch {self.epoch} ended with train loss {total_loss / epoch_steps} validation loss {val_loss} text loss {total_text_loss/ epoch_steps} and audio loss {total_audio_loss/ epoch_steps}")
 
 
     def predict(self, batch):
@@ -227,15 +243,24 @@ class Trainer:
         }, save_path)
 
         if push_to_hub and repo_id:
+            # model weoight for evaluation 
+            hub_save_path = f"{self.checkpoint_dir}/model_only_step-{self.global_step}.pth"
+            torch.save({
+                "epoch": self.epoch,
+                "global_step": self.global_step,
+                "model": self.model.state_dict(),
+            }, hub_save_path)
+
             from huggingface_hub import HfApi
             api = HfApi()
             api.upload_file(
-                path_or_fileobj=save_path,
-                path_in_repo=f"checkpoints/checkpoint_step{self.global_step}.pth",
+                path_or_fileobj=hub_save_path,
+                path_in_repo=f"checkpoints/model_step{self.global_step}.pth",
                 repo_id=repo_id,
                 repo_type="model",
             )
-            self.logger.info(f"Checkpoint pushed to {repo_id}")
+            self.logger.info(f"Model weights pushed to {repo_id}")
+            os.remove(hub_save_path)  # temporäre Datei löschen
 
     def load_checkpoint(self, path: str):
         ckpt = torch.load(path, map_location=self.device)
