@@ -37,7 +37,7 @@ class Trainer:
         self.config = config
         self.epoch: int = 0
         self.global_step: int = 0
-        self.scaler = torch.amp.GradScaler()
+        self.scaler = torch.amp.GradScaler(init_scale=1024, growth_interval=2000)
 
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(logging.INFO)
