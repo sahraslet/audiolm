@@ -8,3 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+
+ckpt/
+scratch/
+data/
+logs/
+wandb/

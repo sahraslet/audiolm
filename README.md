@@ -42,8 +42,11 @@ add results here
 ## Checklist
 
 [ ] Model
-[ ] Training pipeline
-[ ] Audio data preprocessing 
-[ ] Text data preprocessing
-[ ] Evaluation
 
+[ ] Training pipeline
+
+[ ] Audio data preprocessing 
+
+[ ] Text data preprocessing
+
+[ ] Evaluation
