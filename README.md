@@ -4,7 +4,7 @@
 >This repo is associated with the Neural Networks software project (WiSe2025/26) by Prof. Dr. Dietrich Klakow.
 
 ## Architecture
-![Architecture](architecture.png)
+![Architecture](Architecture.png)
 
 ## Usage
 
