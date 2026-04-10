@@ -25,28 +25,5 @@
 
 ```
 
-## Results
 
-### Training
 
-```text
-add results here
-```
-
-### Dashboard
-
-```bash
-
-```
-
-## Checklist
-
-[ ] Model
-
-[ ] Training pipeline
-
-[ ] Audio data preprocessing 
-
-[ ] Text data preprocessing
-
-[ ] Evaluation
